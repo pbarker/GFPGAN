@@ -5,6 +5,7 @@
 # push (backup): cog push r8.im/xinntao/gfpgan
 
 import os
+import time
 
 os.system('python setup.py develop')
 os.system('pip install realesrgan')
@@ -13,6 +14,9 @@ import cv2
 import shutil
 import tempfile
 import torch
+import requests
+import av
+import numpy as np
 from basicsr.archs.srvgg_arch import SRVGGNetCompact
 
 from gfpgan import GFPGANer
@@ -22,6 +26,15 @@ try:
     from realesrgan.utils import RealESRGANer
 except Exception:
     print('please install cog and realesrgan package')
+
+def vid2frames(vidPath, framesOutPath):
+    vidcap = cv2.VideoCapture(vidPath)
+    success,image = vidcap.read()
+    frame = 1
+    while success:
+      yield image
+      success,image = vidcap.read()
+      frame += 1
 
 
 class Predictor(BasePredictor):
@@ -65,7 +78,7 @@ class Predictor(BasePredictor):
 
     def predict(
             self,
-            img: Path = Input(description='Input'),
+            video: Path = Input(description='Input'),
             version: str = Input(
                 description='GFPGAN version. v1.3: better quality. v1.4: more details and better identity.',
                 choices=['v1.2', 'v1.3', 'v1.4', 'RestoreFormer'],
@@ -73,80 +86,119 @@ class Predictor(BasePredictor):
             scale: float = Input(description='Rescaling factor', default=2),
     ) -> Path:
         weight = 0.5
-        print(img, version, scale, weight)
+        print(video, version, scale, weight)
         try:
-            extension = os.path.splitext(os.path.basename(str(img)))[1]
-            img = cv2.imread(str(img), cv2.IMREAD_UNCHANGED)
-            if len(img.shape) == 3 and img.shape[2] == 4:
-                img_mode = 'RGBA'
-            elif len(img.shape) == 2:
-                img_mode = None
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            else:
-                img_mode = None
 
-            h, w = img.shape[0:2]
-            if h < 300:
-                img = cv2.resize(img, (w * 2, h * 2), interpolation=cv2.INTER_LANCZOS4)
+            input_container = av.open(str(video))
+            input_stream = input_container.streams.video[0]
 
-            if self.current_version != version:
-                if version == 'v1.2':
-                    self.face_enhancer = GFPGANer(
-                        model_path='gfpgan/weights/GFPGANv1.2.pth',
-                        upscale=2,
-                        arch='clean',
-                        channel_multiplier=2,
-                        bg_upsampler=self.upsampler)
-                    self.current_version = 'v1.2'
-                elif version == 'v1.3':
-                    self.face_enhancer = GFPGANer(
-                        model_path='gfpgan/weights/GFPGANv1.3.pth',
-                        upscale=2,
-                        arch='clean',
-                        channel_multiplier=2,
-                        bg_upsampler=self.upsampler)
-                    self.current_version = 'v1.3'
-                elif version == 'v1.4':
-                    self.face_enhancer = GFPGANer(
-                        model_path='gfpgan/weights/GFPGANv1.4.pth',
-                        upscale=2,
-                        arch='clean',
-                        channel_multiplier=2,
-                        bg_upsampler=self.upsampler)
-                    self.current_version = 'v1.4'
-                elif version == 'RestoreFormer':
-                    self.face_enhancer = GFPGANer(
-                        model_path='gfpgan/weights/RestoreFormer.pth',
-                        upscale=2,
-                        arch='RestoreFormer',
-                        channel_multiplier=2,
-                        bg_upsampler=self.upsampler)
+            width, height = input_stream.width, input_stream.height
+            fps = input_stream.average_rate
 
-            try:
-                _, _, output = self.face_enhancer.enhance(
-                    img, has_aligned=False, only_center_face=False, paste_back=True, weight=weight)
-            except RuntimeError as error:
-                print('Error', error)
+            print("video width: ", width)
+            print("video height: ", height)
+            print("fps: ", fps)
 
-            try:
-                if scale != 2:
-                    interpolation = cv2.INTER_AREA if scale < 2 else cv2.INTER_LANCZOS4
-                    h, w = img.shape[0:2]
-                    output = cv2.resize(output, (int(w * scale / 2), int(h * scale / 2)), interpolation=interpolation)
-            except Exception as error:
-                print('wrong scale input.', error)
+            new_width = int(width * scale * 2)
+            new_height = int(height * scale * 2)
 
-            if img_mode == 'RGBA':  # RGBA images should be saved in png format
-                extension = 'png'
-            # save_path = f'output/out.{extension}'
-            # cv2.imwrite(save_path, output)
-            out_path = Path(tempfile.mkdtemp()) / f'out.{extension}'
-            cv2.imwrite(str(out_path), output)
+            print("output video width: ", new_width)
+            print("output video height: ", new_height)
+
+            output_container = av.open('out.mp4', mode='w')
+            output_stream = output_container.add_stream('mpeg4', rate=fps)
+            output_stream.width = new_width
+            output_stream.height = new_height
+            output_stream.pix_fmt = 'yuv420p'
+
+            print("output path: ", 'out.mp4')
+
+            for frame in input_container.decode(input_stream):
+
+                img = frame.to_ndarray(format='bgr24')
+
+                if len(img.shape) == 3 and img.shape[2] == 4:
+                    img_mode = 'RGBA'
+                elif len(img.shape) == 2:
+                    img_mode = None
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                else:
+                    img_mode = None
+
+                h, w = img.shape[0:2]
+                if h < 300:
+                    img = cv2.resize(img, (w * 2, h * 2), interpolation=cv2.INTER_LANCZOS4)
+
+                if self.current_version != version:
+                    if version == 'v1.2':
+                        self.face_enhancer = GFPGANer(
+                            model_path='gfpgan/weights/GFPGANv1.2.pth',
+                            upscale=2,
+                            arch='clean',
+                            channel_multiplier=2,
+                            bg_upsampler=self.upsampler)
+                        self.current_version = 'v1.2'
+                    elif version == 'v1.3':
+                        self.face_enhancer = GFPGANer(
+                            model_path='gfpgan/weights/GFPGANv1.3.pth',
+                            upscale=2,
+                            arch='clean',
+                            channel_multiplier=2,
+                            bg_upsampler=self.upsampler)
+                        self.current_version = 'v1.3'
+                    elif version == 'v1.4':
+                        self.face_enhancer = GFPGANer(
+                            model_path='gfpgan/weights/GFPGANv1.4.pth',
+                            upscale=2,
+                            arch='clean',
+                            channel_multiplier=2,
+                            bg_upsampler=self.upsampler)
+                        self.current_version = 'v1.4'
+                    elif version == 'RestoreFormer':
+                        self.face_enhancer = GFPGANer(
+                            model_path='gfpgan/weights/RestoreFormer.pth',
+                            upscale=2,
+                            arch='RestoreFormer',
+                            channel_multiplier=2,
+                            bg_upsampler=self.upsampler)
+
+                try:
+                    print("calling enhancer...")
+                    _, _, output = self.face_enhancer.enhance(
+                        img, has_aligned=False, only_center_face=False, paste_back=True, weight=weight)
+
+                    print("got enhanced output")
+                    print("output shape: ", output.shape)
+                    print("output type: ", output.dtype)
+                except RuntimeError as error:
+                    print('Error', error)
+
+                try:
+                    if scale != 2:
+                        interpolation = cv2.INTER_AREA if scale < 2 else cv2.INTER_LANCZOS4
+                        h, w = img.shape[0:2]
+                        output = cv2.resize(output, (int(w * scale / 2), int(h * scale / 2)), interpolation=interpolation)
+                except Exception as error:
+                    print('wrong scale input.', error)
+
+                # Ensure the upscaled frame is in uint8 format
+                if output.dtype != np.uint8:
+                    print("converting output")
+                    output = (output * 255).astype(np.uint8)
+
+                print("writing frame to video...")
+                output_frame = av.VideoFrame.from_ndarray(output, format='bgr24')
+                output_container.mux(output_stream.encode(output_frame))
+
+                print("wrote frame to video")
+
+            output_container.close()
+
+            return 'out.mp4'
         except Exception as error:
             print('global exception: ', error)
         finally:
             clean_folder('output')
-        return out_path
 
 
 def clean_folder(folder):

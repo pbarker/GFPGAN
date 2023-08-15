@@ -1,5 +1,5 @@
 # This file is used for constructing replicate env
-image: "r8.im/tencentarc/gfpgan"
+image: "r8.im/pbarker/gfpgan-video"
 
 build:
   gpu: true
@@ -7,6 +7,7 @@ build:
   system_packages:
     - "libgl1-mesa-glx"
     - "libglib2.0-0"
+
   python_packages:
     - "torch==1.7.1"
     - "torchvision==0.8.2"
@@ -18,5 +19,7 @@ build:
     - "yapf==0.31.0"
     - "basicsr==1.4.2"
     - "facexlib==0.2.5"
+    - "requests==2.28.1"
+    - "av"
 
 predict: "cog_predict.py:Predictor"
